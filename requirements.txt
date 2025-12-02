@@ -9,4 +9,5 @@ python-dotenv
 openai
 python-jose[cryptography]
 passlib[bcrypt]
-multipart
+python-multipart
+email-validator

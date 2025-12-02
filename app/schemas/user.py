@@ -1,7 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 
-# --- Token 相关 (用于登录响应和依赖注入) ---
+# --- Token 相关 ---
 class Token(BaseModel):
     access_token: str
     token_type: str
