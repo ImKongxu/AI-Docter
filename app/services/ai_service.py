@@ -2,202 +2,186 @@ import httpx
 import json
 import re
 import os
-import io
 from openai import AsyncOpenAI
 from app.models.diagnosis import SymptomInput, ConsultationResponse, DiagnosisResult
-from app.core.session_storage import save_session
+from app.core.session_storage import save_session, load_session
 from app.core.database import AsyncSessionFactory
 from app.crud.history_crud import create_diagnosis_history
 from app.core.config import settings
 
-# ==========================================
-# 工具函数
-# ==========================================
+# --- 工具函数 ---
 def clean_json_string(json_str: str) -> str:
-    """清理 AI 返回的 Markdown 格式，提取纯 JSON"""
     pattern = r"```json\s*(.*?)\s*```"
     match = re.search(pattern, json_str, re.DOTALL)
-    if match:
-        return match.group(1)
+    if match: return match.group(1)
     start = json_str.find('{')
     end = json_str.rfind('}')
-    if start != -1 and end != -1:
-        return json_str[start:end+1]
+    if start != -1 and end != -1: return json_str[start:end+1]
     return json_str
 
 async def download_file(url: str) -> bytes:
-    """辅助函数：下载文件并返回二进制数据"""
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(url)
         resp.raise_for_status()
         return resp.content
 
-# ==========================================
-# 核心功能：多模态处理 (真实调用)
-# ==========================================
-
+# --- 多模态处理 ---
 async def process_voice_input(audio_url: str) -> str:
-    """处理语音输入：下载音频 -> 调用 STT 接口"""
-    print(f"正在处理语音 URL: {audio_url}")
-    
-    # 获取配置 (优先读取环境变量)
-    api_key = os.getenv("MULTI_MODAL_API_KEY", settings.DEEPSEEK_API_KEY) 
-    base_url = os.getenv("MULTI_MODAL_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-
-    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-
-    try:
-        # 1. 下载音频文件 (必需步骤，API通常无法访问你的私有URL)
-        audio_bytes = await download_file(audio_url)
-        
-        # 2. 调用语音转文字 (以 Whisper/SenseVoice 为例)
-        # 注意: 这里的 model 需根据你实际使用的服务商填写 (如 'whisper-1' 或 'paraformer-v1')
-        transcription = await client.audio.transcriptions.create(
-            model="whisper-1",  # 如果用阿里，可用 'paraformer-realtime-v1' 或兼容模型名
-            file=("audio.mp3", audio_bytes, "audio/mpeg"), # 模拟文件名，帮助API识别格式
-        )
-        
-        result_text = transcription.text
-        print(f"语音识别结果: {result_text}")
-        return f"（患者语音转述）：{result_text}"
-    
-    except Exception as e:
-        print(f"语音识别失败: {e}")
-        # 降级处理：依然让流程继续，但不包含语音内容
-        return f"[语音识别失败，请让患者尝试文字描述。错误: {str(e)}]"
-
-async def process_image_input(image_url: str) -> str:
-    """处理图片输入：调用视觉模型"""
-    print(f"正在处理图片 URL: {image_url}")
-    
+    """真实语音识别逻辑"""
+    print(f"处理语音: {audio_url}")
     api_key = os.getenv("MULTI_MODAL_API_KEY", settings.DEEPSEEK_API_KEY)
     base_url = os.getenv("MULTI_MODAL_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-    
-    # 推荐使用 qwen-vl-max (阿里) 或 gpt-4o
-    model_name = "qwen-vl-max" 
-
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-
     try:
-        # 对于图片，如果 URL 是公网可访问的，直接传 URL 即可
-        # 如果 URL 是内网的，你需要先下载并转 base64，这里假设是公网 URL
+        audio_bytes = await download_file(audio_url)
+        transcription = await client.audio.transcriptions.create(
+            model="whisper-1", 
+            file=("audio.mp3", audio_bytes, "audio/mpeg"),
+        )
+        return f"（患者语音自述）：{transcription.text}"
+    except Exception as e:
+        print(f"语音失败: {e}")
+        return f"[语音识别失败: {str(e)}]"
+
+async def process_image_input(image_url: str) -> str:
+    """真实图片识别逻辑"""
+    print(f"处理图片: {image_url}")
+    api_key = os.getenv("MULTI_MODAL_API_KEY", settings.DEEPSEEK_API_KEY)
+    base_url = os.getenv("MULTI_MODAL_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    try:
         response = await client.chat.completions.create(
-            model=model_name,
+            model="qwen-vl-max",
             messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "请仔细阅读这张医疗图片（检查报告或患处照片），提取所有关键文字信息（如异常指标、诊断意见）。不要进行推断，只提取客观文字。"},
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                    ],
-                }
+                {"role": "user", "content": [
+                    {"type": "text", "text": "请提取图中的医疗关键信息（症状、指标等），不要分析，只提取事实。"},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ]}
             ],
             max_tokens=1000
         )
-        extracted_text = response.choices[0].message.content
-        print(f"图片识别结果: {extracted_text}")
-        return f"（基于图片提取的客观数据）：{extracted_text}"
-
+        return f"（图片提取信息）：{response.choices[0].message.content}"
     except Exception as e:
-        print(f"图片识别异常: {e}")
-        return f"[图片识别失败。错误: {str(e)}]"
+        print(f"图片失败: {e}")
+        return f"[图片识别失败: {str(e)}]"
 
-# ==========================================
-# 主流程：AI 问诊
-# ==========================================
+# --- 核心主流程 (支持多轮对话) ---
 
 async def process_symptoms_async(session_id: str, user_id: int, data: SymptomInput):
-    """DeepSeek 诊断主流程"""
     try:
-        # 1. 状态: 分析输入
-        await save_session(session_id, ConsultationResponse(
-            session_id=session_id, status="processing", progress=10,
-            next_question="正在解析您的输入数据...", diagnosis_result=None
-        ))
+        # 1. 加载当前会话
+        session = await load_session(session_id)
+        if not session: return
 
-        # 2. 多模态转换
-        symptoms_text = ""
-        
+        # 2. 解析本次输入
+        current_text = ""
         if data.input_type == "text":
-            symptoms_text = data.content
-            await save_session(session_id, ConsultationResponse(
-                session_id=session_id, status="processing", progress=20, next_question="正在理解病情..."
-            ))
-            
+            current_text = data.content
         elif data.input_type == "voice":
-            await save_session(session_id, ConsultationResponse(
-                session_id=session_id, status="processing", progress=20, next_question="正在将语音转换为文字..."
-            ))
-            symptoms_text = await process_voice_input(data.content)
-            
+            current_text = await process_voice_input(data.content)
         elif data.input_type == "image":
-            await save_session(session_id, ConsultationResponse(
-                session_id=session_id, status="processing", progress=20, next_question="正在读取检查报告..."
-            ))
-            symptoms_text = await process_image_input(data.content)
+            current_text = await process_image_input(data.content)
 
-        # 3. 状态: AI 思考中
-        await save_session(session_id, ConsultationResponse(
-            session_id=session_id, status="processing", progress=60,
-            next_question="AI 专家正在综合分析病情...", diagnosis_result=None
-        ))
-
-        # 4. 构造 Prompt
-        prompt = f"""
-        你是一位经验丰富的三甲医院全科医生。请根据以下信息进行初步诊断。
+        # 3. 将新输入追加到历史记录 (User Role)
+        session.history.append({"role": "user", "content": current_text})
         
-        【患者主诉/检查数据】: 
-        {symptoms_text}
+        # 4. 构造 AI 提示词 (Prompt)
+        # 关键：要求 AI 判断是追问 (question) 还是诊断 (diagnosis)
+        system_prompt = """
+        你是一位专业、耐心、负责的三甲医院全科医生。
         
-        请严格按照以下 JSON 格式输出（不要输出 Markdown 代码块）：
-        {{
-          "possible_causes": [ {{ "name": "疾病名称", "confidence": "概率(如85%)" }} ],
-          "risk_level": "low" 或 "medium" 或 "high",
-          "advice": "给患者的专业建议，包括需进行的检查或生活指导（200字以内）"
-        }}
+        【任务目标】
+        通过与患者的多轮对话，收集足够的信息，给出初步诊断建议。
+        
+        【决策逻辑】
+        分析对话历史，判断信息是否充足（如：发病时间、诱因、伴随症状、疼痛程度等）。
+        1. [需要追问]：如果信息模糊或缺失，请提出**一个**最关键的追问问题。语气要亲切。
+        2. [给出诊断]：如果信息已基本充足，或已经追问了超过 3 轮，请给出详细的诊断结果。
+        
+        【输出格式】
+        必须严格输出为以下 JSON 格式（不要包含 markdown 标记）：
+        
+        情况 A（需要追问）：
+        {
+            "type": "question",
+            "content": "这里写你要追问患者的具体问题"
+        }
+        
+        情况 B（诊断报告）：
+        {
+            "type": "diagnosis",
+            "result": {
+                "possible_causes": [{"name": "疾病A", "confidence": "80%"}, {"name": "疾病B", "confidence": "20%"}],
+                "risk_level": "low" 或 "medium" 或 "high" 或 "urgent",
+                "advice": "给患者的详细建议（包含就医指导、生活建议）"
+            }
+        }
         """
 
-        # 5. 调用 DeepSeek
+        # 构造发给 DeepSeek 的完整消息链
+        messages = [{"role": "system", "content": system_prompt}]
+        # 追加所有历史对话
+        for msg in session.history:
+            # 过滤掉 DeepSeek 不认识的字段，只留 role 和 content
+            messages.append({"role": msg["role"], "content": msg["content"]})
+
+        # 5. 调用 DeepSeek API
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"
         }
-        
-        # 使用 httpx 直接调用 DeepSeek (因为 ai_service 上面用了 OpenAI SDK 可能会有 BaseURL 冲突，这里分开写最稳)
         payload = {
             "model": "deepseek-chat",
-            "messages": [
-                {"role": "system", "content": "You are a helpful medical AI. Return JSON only."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.3,
+            "messages": messages,
+            "temperature": 0.5, # 适度灵活，方便自然追问
             "stream": False
         }
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(settings.DEEPSEEK_API_URL, headers=headers, json=payload)
             resp.raise_for_status()
-            api_res = resp.json()
-            raw_content = api_res["choices"][0]["message"]["content"]
+            ai_raw = resp.json()["choices"][0]["message"]["content"]
             
-            # 解析结果
-            final_result = json.loads(clean_json_string(raw_content))
-            diagnosis = DiagnosisResult(**final_result)
+            # 清理并解析 JSON
+            parsed_res = json.loads(clean_json_string(ai_raw))
+
+        # 6. 根据 AI 决策更新状态
+        if parsed_res.get("type") == "question":
+            # --- 分支 A：AI 决定追问 ---
+            question_text = parsed_res["content"]
+            
+            session.status = "awaiting_input" # 状态变为等待用户输入
+            session.next_question = question_text
+            session.progress = min(session.progress + 15, 90) # 进度条增加
+            
+            # 将 AI 的问题加入历史
+            session.history.append({"role": "assistant", "content": question_text})
+            
+        elif parsed_res.get("type") == "diagnosis":
+            # --- 分支 B：AI 决定出结果 ---
+            diag_data = parsed_res["result"]
+            final_diagnosis = DiagnosisResult(**diag_data)
+            
+            session.status = "complete" # 状态变为完成
+            session.progress = 100
+            session.diagnosis_result = final_diagnosis
+            session.next_question = None
+            
+            # 将诊断摘要加入历史
+            session.history.append({"role": "assistant", "content": f"诊断完成。主要判断为：{final_diagnosis.possible_causes[0]['name']}。建议：{final_diagnosis.advice}"})
+            
+            # 存入数据库
+            if final_diagnosis.risk_level != "unknown":
+                async with AsyncSessionFactory() as db_session:
+                    await create_diagnosis_history(db_session, user_id, session_id, final_diagnosis)
 
     except Exception as e:
-        print(f"诊断流程错误: {e}")
-        # 发生错误时，保存一个错误的诊断结果，避免前端一直卡在 processing
-        diagnosis = DiagnosisResult(
-            possible_causes=[], risk_level="unknown", advice=f"服务暂时繁忙，请稍后重试。({str(e)})"
-        )
+        print(f"AI Process Error: {e}")
+        session.status = "awaiting_input"
+        # 遇到错误时，让用户重试，而不是卡死
+        err_msg = "抱歉，刚才连接不稳定，请您重新描述一下症状。"
+        session.next_question = err_msg
+        session.history.append({"role": "assistant", "content": err_msg})
 
-    # 6. 完成并保存
-    final_data = ConsultationResponse(
-        session_id=session_id, status="complete", progress=100,
-        next_question=None, diagnosis_result=diagnosis
-    )
-    await save_session(session_id, final_data)
-
-    if diagnosis.risk_level != "unknown":
-        async with AsyncSessionFactory() as db_session:
-            await create_diagnosis_history(db_session, user_id, session_id, diagnosis)
+    # 7. 保存更新后的会话数据到 Redis/内存
+    await save_session(session_id, session)
