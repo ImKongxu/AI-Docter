@@ -1,0 +1,15 @@
+# Environment variables
+.env
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+ai_diagnosis_env/
+.venv/
+venv/
+ENV/
+env/

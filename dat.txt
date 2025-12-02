@@ -1,2 +1,0 @@
-word text1
-text2
