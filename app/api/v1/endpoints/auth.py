@@ -1,42 +1,53 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from datetime import timedelta
+
 from app.core.database import get_db_session
-from app.models.user import UserCreate, UserLogin, UserResponse
-from app.core.security import hash_password, verify_password
-# 这里的 User 需要你在 models/user.py 里定义好 SQLAlchemy 模型，
-# 但你的 models/user.py 目前是 Pydantic 模型。
-# 为了快速跑通，我们这里用简单的逻辑演示，你需要确保数据库里有 User 表
-# 建议：在 app/models/user.py 里补充 SQLAlchemy 定义 (见下文)
+from app.core.security import verify_password, create_access_token
+from app.core.config import settings
+from app.crud.user_crud import get_user_by_email, create_user
+from app.schemas.user import UserCreate, UserResponse, Token
 
 router = APIRouter()
 
-# 这是一个模拟的内存数据库，为了不让你改动太大 models/crud
-# 生产环境请务必替换为真实 DB 操作
-fake_users_db = {} 
-
 @router.post("/register", response_model=UserResponse)
-async def register(user_in: UserCreate):
-    if user_in.email in fake_users_db:
-        raise HTTPException(status_code=400, detail="Email already registered")
+async def register(
+    user_in: UserCreate, 
+    db: AsyncSession = Depends(get_db_session)
+):
+    # 1. 检查邮箱是否已存在
+    user = await get_user_by_email(db, email=user_in.email)
+    if user:
+        raise HTTPException(
+            status_code=400,
+            detail="该邮箱已被注册"
+        )
     
-    hashed_pw = hash_password(user_in.password)
-    user_id = len(fake_users_db) + 1
-    
-    user_data = {
-        "user_id": user_id,
-        "email": user_in.email,
-        "phone_number": user_in.phone_number,
-        "hashed_password": hashed_pw,
-        "is_active": True
-    }
-    fake_users_db[user_in.email] = user_data
-    return user_data
+    # 2. 创建新用户
+    new_user = await create_user(db, user_in)
+    return new_user
 
-@router.post("/login")
-async def login(user_in: UserLogin):
-    user = fake_users_db.get(user_in.email)
-    if not user or not verify_password(user_in.password, user["hashed_password"]):
-        raise HTTPException(status_code=400, detail="Incorrect email or password")
+@router.post("/login", response_model=Token)
+async def login(
+    # 使用 OAuth2 标准表单 (username, password)
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_db_session)
+):
+    # 1. 验证用户
+    user = await get_user_by_email(db, email=form_data.username)
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="邮箱或密码错误",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
-    return {"message": "Login successful", "user_id": user["user_id"]}
+    # 2. 生成 Token
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": str(user.id)}, # 将用户ID放入 Token
+        expires_delta=access_token_expires
+    )
+    
+    return {"access_token": access_token, "token_type": "bearer"}

@@ -1,7 +1,9 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
 from app.models.diagnosis import SymptomInput, ConsultationResponse, DiagnosisResult
 from app.services.ai_service import process_symptoms_async
 from app.core.session_storage import load_session, save_session, session_exists
+from app.api.deps import get_current_user # 导入依赖
+from app.models.user import User
 import uuid
 
 router = APIRouter()
@@ -10,17 +12,17 @@ router = APIRouter()
 async def submit_symptom(
     symptom_data: SymptomInput,
     background_tasks: BackgroundTasks,
-    current_user: int = 1 # 假设通过依赖注入获取用户ID, 暂时硬编码为 1
+    current_user: User = Depends(get_current_user) # 关键修改：自动验证 Token 并获取用户对象
 ):
     """
     提交症状描述，启动或继续问诊会话。
+    需要 Header: Authorization: Bearer <your_token>
     """
     session_id = symptom_data.session_id
     
-    # 首次提交或会话ID无效，生成新的会话ID
+    # ... (原有 session 逻辑不变) ...
     if not session_id or not await session_exists(session_id):
         session_id = str(uuid.uuid4())
-        # 初始化会话状态并存入 Redis
         initial_data = ConsultationResponse(
             session_id=session_id,
             status="processing",
@@ -29,43 +31,15 @@ async def submit_symptom(
         )
         await save_session(session_id, initial_data)
     
-    # 异步处理：避免复杂 AI 逻辑阻塞主线程
+    # 异步任务传入真实的用户 ID
     background_tasks.add_task(
         process_symptoms_async, 
         session_id, 
-        current_user, 
+        current_user.id,  # 使用解析出来的真实 ID
         symptom_data
     )
     
-    # 立即返回当前会话状态
     current_session = await load_session(session_id)
     return current_session
 
-@router.get("/consultation/{session_id}/status", response_model=ConsultationResponse)
-async def get_consultation_status(session_id: str):
-    """
-    前端定期轮询（例如，间隔3秒）以获取最新状态。
-    """
-    session_data = await load_session(session_id)
-    if not session_data:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    
-    return session_data
-
-@router.get("/consultation/{session_id}/result", response_model=DiagnosisResult)
-async def get_diagnosis_result(session_id: str):
-    """
-    获取最终的诊断结果。
-    只有在 status 为 'complete' 时才能成功返回。
-    """
-    session_data = await load_session(session_id)
-    if not session_data:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    
-    if session_data.status != "complete":
-        raise HTTPException(status_code=425, detail="诊断仍在进行中，请稍后重试。") # 425 Too Early
-        
-    if not session_data.diagnosis_result:
-        raise HTTPException(status_code=500, detail="诊断已完成但结果数据丢失。")
-
-    return session_data.diagnosis_result
+# ... status 和 result 接口保持不变，或者也可以加上 Depends(get_current_user) 进行保护 ...

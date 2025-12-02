@@ -1,13 +1,22 @@
 import bcrypt
 from datetime import datetime, timedelta
 from typing import Optional
-
-# ... JWT 相关的导入和配置稍后添加 ...
+from jose import jwt
+from app.core.config import settings
 
 def hash_password(password: str) -> str:
-    """使用 BCrypt 算法加密密码。"""
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """验证明文密码是否与哈希密码匹配。"""
     return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return encoded_jwt
