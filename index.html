@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 智能医疗助手 - 完整版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    
+    <style>
+        body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f3f4f6; }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .prose p { margin-bottom: 0.5rem; }
+        .prose ul { list-style-type: disc; padding-left: 1.2rem; }
+        .user-bubble .prose { color: white; }
+        .user-bubble .prose strong { color: #e0f2fe; }
+    </style>
+</head>
+<body id="app" class="h-screen flex flex-col text-gray-700">
+
+    <div v-if="globalLoading" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+        <div class="bg-white p-4 rounded-lg shadow-lg flex items-center">
+            <i class="fa-solid fa-circle-notch fa-spin text-blue-600 text-xl mr-3"></i>
+            <span>{{ loadingText }}</span>
+        </div>
+    </div>
+
+    <div v-if="!isLoggedIn" class="flex-1 flex flex-col items-center justify-center p-4 bg-blue-50">
+        <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md">
+            <div class="text-center mb-8">
+                <div class="w-16 h-16 bg-blue-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <i class="fa-solid fa-user-doctor text-3xl text-white"></i>
+                </div>
+                <h1 class="text-2xl font-bold text-gray-800">AI 医疗助手</h1>
+                <p class="text-gray-500 text-sm mt-2">您的专属智能健康顾问</p>
+            </div>
+
+            <div class="flex bg-gray-100 p-1 rounded-lg mb-6">
+                <button @click="authMode='login'" :class="authMode==='login'?'bg-white text-blue-600 shadow':''" class="flex-1 py-2 rounded-md text-sm font-medium transition-all">登录</button>
+                <button @click="authMode='register'" :class="authMode==='register'?'bg-white text-blue-600 shadow':''" class="flex-1 py-2 rounded-md text-sm font-medium transition-all">注册</button>
+            </div>
+
+            <form @submit.prevent="handleAuth" class="space-y-4">
+                <input v-model="authForm.email" type="email" placeholder="邮箱" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                <input v-model="authForm.password" type="password" placeholder="密码 (至少8位)" required minlength="8" class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                <button type="submit" class="w-full bg-blue-600 text-white py-2.5 rounded-lg hover:bg-blue-700 font-bold transition">
+                    {{ authMode === 'login' ? '登录' : '注册' }}
+                </button>
+            </form>
+            <p v-if="authError" class="mt-4 text-red-500 text-sm text-center">{{ authError }}</p>
+        </div>
+    </div>
+
+    <div v-else class="flex h-screen overflow-hidden">
+        <aside :class="['bg-white shadow-xl z-20 flex flex-col absolute md:relative h-full transition-all duration-300', showSidebar ? 'w-72 translate-x-0' : 'w-0 -translate-x-full md:w-72 md:translate-x-0']">
+            <div class="p-4 border-b flex justify-between items-center bg-blue-50">
+                <span class="font-bold text-blue-800"><i class="fa-solid fa-clock-rotate-left mr-2"></i>历史记录</span>
+                <button @click="logout" class="text-gray-400 hover:text-red-500"><i class="fa-solid fa-power-off"></i></button>
+            </div>
+            <div class="flex-1 overflow-y-auto p-2 space-y-2">
+                <div v-if="historyLoading" class="text-center py-4 text-gray-400"><i class="fa-solid fa-spinner fa-spin"></i></div>
+                <div v-else-if="historyList.length === 0" class="text-center py-10 text-gray-400 text-sm">暂无历史记录</div>
+                <div v-for="record in historyList" :key="record.id" @click="loadHistoryItem(record)" 
+                     class="p-3 rounded-lg border border-gray-100 hover:bg-blue-50 cursor-pointer transition shadow-sm">
+                    <div class="flex justify-between mb-1">
+                        <span :class="getRiskBadgeClass(record.risk_level)" class="text-xs px-2 py-0.5 rounded font-bold uppercase">{{ record.risk_level }}</span>
+                        <span class="text-xs text-gray-400">{{ formatDateShort(record.created_at) }}</span>
+                    </div>
+                    <div class="text-xs text-gray-600 truncate">{{ record.possible_causes[0]?.name || '未知结果' }}</div>
+                </div>
+            </div>
+        </aside>
+
+        <div v-if="showSidebar" @click="showSidebar = false" class="fixed inset-0 bg-black bg-opacity-25 z-10 md:hidden"></div>
+
+        <div class="flex-1 flex flex-col bg-gray-100 w-full relative">
+            <header class="bg-white shadow-sm px-4 py-3 flex justify-between items-center z-10">
+                <div class="flex items-center">
+                    <button @click="showSidebar = !showSidebar" class="md:hidden mr-3"><i class="fa-solid fa-bars"></i></button>
+                    <div>
+                        <h2 class="font-bold text-gray-800">AI 医生助手</h2>
+                        <p v-if="currentStatus === 'processing'" class="text-xs text-blue-600 flex items-center">
+                            <i class="fa-solid fa-spinner fa-spin mr-1"></i> 正在分析...
+                        </p>
+                    </div>
+                </div>
+                <button @click="resetChat" class="text-sm bg-blue-50 text-blue-600 px-3 py-1.5 rounded hover:bg-blue-100 transition">
+                    <i class="fa-solid fa-plus mr-1"></i> 新对话
+                </button>
+            </header>
+
+            <main class="flex-1 overflow-y-auto p-4 space-y-4" id="chat-container">
+                <div v-for="(msg, index) in chatMessages" :key="index" :class="['flex', msg.role === 'user' ? 'justify-end' : 'justify-start']">
+                    <div v-if="msg.role !== 'user'" class="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs mr-2 mt-1 flex-shrink-0">
+                        <i class="fa-solid fa-user-doctor"></i>
+                    </div>
+
+                    <div :class="['max-w-[85%] rounded-2xl px-4 py-3 text-sm shadow-sm', 
+                        msg.role === 'user' ? 'bg-blue-600 text-white rounded-tr-none user-bubble' : 'bg-white text-gray-800 rounded-tl-none ai-bubble']">
+                        
+                        <div v-if="msg.type === 'text'" class="prose prose-sm" v-html="renderMarkdown(msg.content)"></div>
+                        
+                        <div v-if="msg.type === 'image'" class="flex flex-col">
+                            <span class="text-xs opacity-70 mb-1"><i class="fa-regular fa-image"></i> 图片链接</span>
+                            <a :href="msg.content" target="_blank" class="underline truncate">{{ msg.content }}</a>
+                        </div>
+                        <div v-if="msg.type === 'voice'" class="flex flex-col">
+                            <span class="text-xs opacity-70 mb-1"><i class="fa-solid fa-microphone"></i> 语音链接</span>
+                            <a :href="msg.content" target="_blank" class="underline truncate">{{ msg.content }}</a>
+                        </div>
+
+                        <div v-if="msg.diagnosis" class="mt-3 pt-3 border-t border-gray-100">
+                            <div class="flex justify-between items-center mb-2">
+                                <span class="font-bold">诊断报告</span>
+                                <span :class="getRiskBadgeClass(msg.diagnosis.risk_level)" class="px-2 py-0.5 rounded text-xs font-bold uppercase">{{ msg.diagnosis.risk_level }} 风险</span>
+                            </div>
+                            <div class="space-y-2">
+                                <div>
+                                    <p class="text-xs text-gray-400 font-bold mb-1">可能病因</p>
+                                    <div class="flex flex-wrap gap-1">
+                                        <span v-for="c in msg.diagnosis.possible_causes" class="bg-gray-100 px-2 py-1 rounded text-xs text-gray-700">
+                                            {{ c.name }} <span class="text-blue-600 font-bold">{{ c.confidence }}</span>
+                                        </span>
+                                    </div>
+                                </div>
+                                <div class="bg-blue-50 p-2 rounded border border-blue-100">
+                                    <p class="text-xs text-blue-500 font-bold mb-1">建议</p>
+                                    <div class="text-blue-900" v-html="renderMarkdown(msg.diagnosis.advice)"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div v-if="msg.role === 'user'" class="w-8 h-8 rounded-full bg-gray-300 flex items-center justify-center text-white text-xs ml-2 mt-1 flex-shrink-0">
+                        <i class="fa-solid fa-user"></i>
+                    </div>
+                </div>
+                
+                <div class="h-2"></div>
+            </main>
+
+            <footer class="bg-white p-3 border-t shadow-lg z-10">
+                <div class="max-w-4xl mx-auto">
+                    <div class="flex space-x-4 mb-2 px-1 text-xs text-gray-500">
+                        <label class="cursor-pointer flex items-center hover:text-blue-600">
+                            <input type="radio" v-model="inputType" value="text" class="mr-1"> 文本
+                        </label>
+                        <label class="cursor-pointer flex items-center hover:text-blue-600">
+                            <input type="radio" v-model="inputType" value="image" class="mr-1"> 图片 URL
+                        </label>
+                        <label class="cursor-pointer flex items-center hover:text-blue-600">
+                            <input type="radio" v-model="inputType" value="voice" class="mr-1"> 语音链接
+                        </label>
+                    </div>
+                    
+                    <div class="flex gap-2">
+                        <input v-model="inputContent" @keyup.enter="submitSymptom" :placeholder="inputPlaceholder" 
+                            :disabled="currentStatus === 'processing' || isHistoryMode"
+                            class="flex-1 border rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 outline-none disabled:bg-gray-100">
+                        <button @click="submitSymptom" :disabled="currentStatus === 'processing' || !inputContent || isHistoryMode" 
+                            class="bg-blue-600 text-white px-4 rounded-lg hover:bg-blue-700 disabled:bg-gray-300 transition">
+                            <i class="fa-solid fa-paper-plane"></i>
+                        </button>
+                    </div>
+                    <div v-if="isHistoryMode" class="text-xs text-center text-gray-400 mt-1">
+                        当前为历史记录查看模式，如需咨询请点击顶部“新对话”
+                    </div>
+                </div>
+            </footer>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted, nextTick, computed } = Vue;
+        const API_BASE = 'http://127.0.0.1:8000/api/v1';
+
+        createApp({
+            setup() {
+                const isLoggedIn = ref(false);
+                const authMode = ref('login');
+                const authForm = ref({ email: '', password: '' });
+                const authError = ref('');
+                const globalLoading = ref(false);
+                const loadingText = ref('');
+                const showSidebar = ref(false);
+                
+                const initialMsg = { role: 'ai', type: 'text', content: '您好！我是您的 AI 医生。请描述您的症状（如：头痛、发烧），或者提供检查报告图片链接。' };
+                const chatMessages = ref([initialMsg]);
+                const inputType = ref('text');
+                const inputContent = ref('');
+                
+                const currentStatus = ref('idle'); 
+                const currentSessionId = ref(null); 
+                const isHistoryMode = ref(false); // 标记是否正在查看历史
+                
+                const historyList = ref([]);
+                const historyLoading = ref(false);
+
+                // --- Helper ---
+                const renderMarkdown = (text) => text ? marked.parse(text) : '';
+                const formatDateShort = (str) => new Date(str).toLocaleDateString('zh-CN', {month:'2-digit', day:'2-digit'});
+                const scrollToBottom = () => nextTick(() => {
+                    const el = document.getElementById('chat-container');
+                    if(el) el.scrollTop = el.scrollHeight;
+                });
+
+                const inputPlaceholder = computed(() => {
+                    if(isHistoryMode.value) return '查看历史记录中...';
+                    if(currentStatus.value === 'processing') return 'AI 正在分析中，请稍候...';
+                    if(inputType.value === 'text') return '请输入症状...';
+                    return `请输入${inputType.value === 'image'?'图片':'语音'}的 URL...`;
+                });
+
+                // --- Auth ---
+                const handleAuth = async () => {
+                    authError.value = '';
+                    globalLoading.value = true;
+                    loadingText.value = '请求中...';
+                    try {
+                        const form = new FormData();
+                        form.append('username', authForm.value.email);
+                        form.append('password', authForm.value.password);
+                        
+                        if (authMode.value === 'register') {
+                            await axios.post(`${API_BASE}/auth/register`, {
+                                email: authForm.value.email, password: authForm.value.password, phone_number: null
+                            });
+                            alert('注册成功，请登录');
+                            authMode.value = 'login';
+                        } else {
+                            const res = await axios.post(`${API_BASE}/auth/login`, form);
+                            localStorage.setItem('token', res.data.access_token);
+                            isLoggedIn.value = true;
+                            fetchHistory();
+                        }
+                    } catch (e) {
+                        authError.value = e.response?.data?.detail || '操作失败';
+                    } finally { globalLoading.value = false; }
+                };
+
+                const logout = () => {
+                    localStorage.removeItem('token');
+                    isLoggedIn.value = false;
+                    resetChat();
+                };
+
+                // --- Chat Logic ---
+                const resetChat = () => {
+                    chatMessages.value = [initialMsg];
+                    currentSessionId.value = null; 
+                    currentStatus.value = 'idle';
+                    isHistoryMode.value = false; // 退出历史模式
+                    showSidebar.value = false;
+                    if (window.pollTimer) clearInterval(window.pollTimer);
+                };
+
+                const submitSymptom = async () => {
+                    if (!inputContent.value || isHistoryMode.value) return;
+                    
+                    chatMessages.value.push({ role: 'user', type: inputType.value, content: inputContent.value });
+                    const payload = { 
+                        session_id: currentSessionId.value,
+                        input_type: inputType.value, 
+                        content: inputContent.value 
+                    };
+                    inputContent.value = '';
+                    scrollToBottom();
+
+                    try {
+                        currentStatus.value = 'processing';
+                        const token = localStorage.getItem('token');
+                        const res = await axios.post(`${API_BASE}/consultation/submit_symptom`, payload, {
+                            headers: { Authorization: `Bearer ${token}` }
+                        });
+                        
+                        currentSessionId.value = res.data.session_id;
+                        pollStatus(res.data.session_id);
+
+                    } catch (e) {
+                        console.error(e);
+                        chatMessages.value.push({ role: 'ai', type: 'text', content: '连接服务失败，请重试。' });
+                        currentStatus.value = 'idle';
+                    }
+                };
+
+                const pollStatus = (sessionId) => {
+                    const token = localStorage.getItem('token');
+                    if (window.pollTimer) clearInterval(window.pollTimer);
+
+                    window.pollTimer = setInterval(async () => {
+                        try {
+                            const res = await axios.get(`${API_BASE}/consultation/${sessionId}/status`, {
+                                headers: { Authorization: `Bearer ${token}` }
+                            });
+                            
+                            const status = res.data.status;
+                            const backendHistory = res.data.history || [];
+
+                            // 同步逻辑：仅当不是 processing 时同步，防止闪烁
+                            if (status !== 'processing') {
+                                const msgs = [initialMsg];
+                                backendHistory.forEach(h => {
+                                    // 过滤掉我们自己刚发的重复消息，或者后端初始消息
+                                    if (h.content && h.content !== "正在分析您的病情...") {
+                                        msgs.push({ role: h.role, type: 'text', content: h.content });
+                                    }
+                                });
+                                
+                                // 追加诊断卡片
+                                if (status === 'complete' && res.data.diagnosis_result) {
+                                    msgs.push({
+                                        role: 'ai', type: 'text',
+                                        content: '✅ 诊断完成，请查看报告：',
+                                        diagnosis: res.data.diagnosis_result
+                                    });
+                                }
+                                chatMessages.value = msgs;
+                                scrollToBottom();
+                            }
+
+                            if (status === 'awaiting_input') {
+                                clearInterval(window.pollTimer);
+                                currentStatus.value = 'idle';
+                            }
+                            if (status === 'complete') {
+                                clearInterval(window.pollTimer);
+                                currentStatus.value = 'idle';
+                                // 关键：不置空 currentSessionId，保持连接
+                                fetchHistory(); 
+                            }
+
+                        } catch (e) {
+                            clearInterval(window.pollTimer);
+                            currentStatus.value = 'idle';
+                        }
+                    }, 2000);
+                };
+
+                const fetchHistory = async () => {
+                    historyLoading.value = true;
+                    try {
+                        const res = await axios.get(`${API_BASE}/history`, {
+                            headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+                        });
+                        historyList.value = res.data;
+                    } catch(e){} finally { historyLoading.value = false; }
+                };
+
+                const loadHistoryItem = (record) => {
+                    if (window.pollTimer) clearInterval(window.pollTimer); // 停止任何正在进行的轮询
+                    isHistoryMode.value = true; // 进入只读模式
+                    showSidebar.value = false;
+                    
+                    const msgs = [initialMsg];
+                    // 1. 还原对话历史 (如果有)
+                    if (record.dialogue_history && record.dialogue_history.length > 0) {
+                        record.dialogue_history.forEach(h => {
+                            if(h.content) msgs.push({ role: h.role, type: 'text', content: h.content });
+                        });
+                    } else {
+                        // 兼容旧数据
+                        msgs.push({ role: 'ai', type: 'text', content: `[系统] 该记录生成于 ${formatDateShort(record.created_at)}，暂无详细对话存档。` });
+                    }
+
+                    // 2. 追加最终诊断
+                    msgs.push({
+                        role: 'ai', type: 'text', content: '诊断报告存档：',
+                        diagnosis: {
+                            risk_level: record.risk_level,
+                            possible_causes: record.possible_causes,
+                            advice: record.advice
+                        }
+                    });
+                    
+                    chatMessages.value = msgs;
+                    scrollToBottom();
+                };
+
+                const getRiskBadgeClass = (level) => {
+                    const map = { 'low': 'bg-green-100 text-green-800', 'medium': 'bg-yellow-100 text-yellow-800', 'high': 'bg-orange-100 text-orange-800', 'urgent': 'bg-red-100 text-red-800' };
+                    return map[level] || 'bg-gray-100';
+                };
+
+                onMounted(() => {
+                    if (localStorage.getItem('token')) {
+                        isLoggedIn.value = true;
+                        fetchHistory();
+                    }
+                });
+
+                return {
+                    isLoggedIn, authMode, authForm, authError, globalLoading, loadingText, showSidebar,
+                    chatMessages, inputType, inputContent, currentStatus, inputPlaceholder, isHistoryMode,
+                    historyList, historyLoading,
+                    handleAuth, logout, submitSymptom, loadHistoryItem, resetChat,
+                    renderMarkdown, getRiskBadgeClass, formatDateShort
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>

@@ -162,18 +162,25 @@ async def process_symptoms_async(session_id: str, user_id: int, data: SymptomInp
             diag_data = parsed_res["result"]
             final_diagnosis = DiagnosisResult(**diag_data)
             
-            session.status = "complete" # 状态变为完成
+            session.status = "complete"
             session.progress = 100
             session.diagnosis_result = final_diagnosis
             session.next_question = None
             
-            # 将诊断摘要加入历史
-            session.history.append({"role": "assistant", "content": f"诊断完成。主要判断为：{final_diagnosis.possible_causes[0]['name']}。建议：{final_diagnosis.advice}"})
+            # 将诊断摘要加入历史 (这一步很重要，让历史记录里包含 AI 最后的结论)
+            # 但不要把巨大的 JSON 放这里，只放简短文本，JSON 单独存
+            session.history.append({"role": "assistant", "content": "诊断已完成，请查看下方的详细报告。"})
             
             # 存入数据库
             if final_diagnosis.risk_level != "unknown":
                 async with AsyncSessionFactory() as db_session:
-                    await create_diagnosis_history(db_session, user_id, session_id, final_diagnosis)
+                    await create_diagnosis_history(
+                        db=db_session,
+                        user_id=user_id,
+                        session_id=session_id,
+                        result=final_diagnosis,
+                        history=session.history # <--- 关键修改：传入完整历史
+                    )
 
     except Exception as e:
         print(f"AI Process Error: {e}")
